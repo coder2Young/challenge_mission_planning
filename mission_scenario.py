@@ -44,8 +44,8 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial import distance
-from python_tsp.exact import solve_tsp_dynamic_programming
-from python_tsp.heuristics import solve_tsp_simulated_annealing, solve_tsp_local_search
+from python_tsp.exact import solve_tsp_dynamic_programming, solve_tsp_brute_force
+from python_tsp.heuristics import solve_tsp_simulated_annealing, solve_tsp_local_search, solve_tsp_lin_kernighan
 
 from as2_python_api.drone_interface import DroneInterface
 try:
@@ -67,11 +67,11 @@ OBSTACLE_SAFETY_MARGIN = 0.5  # Safety margin around obstacles in meters
 WAYPOINT_TOLERANCE = 0.1  # Distance tolerance for waypoint achievement in meters
 
 # Path planning methods
-PATH_PLANNING_METHODS = ['direct', 'a_star', 'rrt']
-DEFAULT_PATH_PLANNING = 'a_star'
+PATH_PLANNING_METHODS = ['direct', 'a_star', 'diplotjkstra', 'rrt']
+DEFAULT_PATH_PLANNING = 'rrt'
 
 # TSP solver methods
-TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search']
+TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search', 'brute_force', 'lin_kernighan']
 DEFAULT_TSP_METHOD = 'simulated_annealing'
 
 # Default parameters
@@ -111,6 +111,12 @@ def drone_start(drone_interface: DroneInterface, logger=None) -> bool:
     print(f'Take Off success: {success}')
     if logger:
         logger.info(f'Take Off success: {success}')
+
+    # Init position [0, 0, TAKE_OFF_HEIGHT]
+    # Back to the initial position if the drone is not there
+    if drone_interface.position != [0, 0, TAKE_OFF_HEIGHT]:
+        print('Back to initial position')
+        drone_interface.go_to(x=0, y=0, z=TAKE_OFF_HEIGHT, speed=SPEED)
 
     return success
 
@@ -485,8 +491,13 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
         permutation, distance = solve_tsp_simulated_annealing(distance_matrix)
     elif tsp_method == 'local_search':
         permutation, distance = solve_tsp_local_search(distance_matrix)
+    elif tsp_method == 'brute_force':
+        permutation, distance = solve_tsp_brute_force(distance_matrix)
+    elif tsp_method == 'lin_kernighan':
+        permutation, distance = solve_tsp_lin_kernighan(distance_matrix)
     else:
         # Default to simulated annealing
+        print(f"Unknown TSP method: {tsp_method}, defaulting to simulated annealing")
         permutation, distance = solve_tsp_simulated_annealing(distance_matrix)
     
     solve_end_time = time.time()
@@ -504,6 +515,278 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     print(f"Optimized path length: {distance:.2f} units.")
     
     return optimized_ids, distance
+
+
+def dijkstra_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
+    """
+    Implement Dijkstra's algorithm for path planning between viewpoints.
+    
+    :param start: 3D start point [x, y, z]
+    :param goal: 3D end point [x, y, z]
+    :param obstacles: Dictionary of obstacles with position and dimensions
+    :param margin: Safety margin around obstacles in meters
+    :return: List of waypoints including start and goal
+    """
+    # Check if direct path is possible
+    if is_collision_free(start, goal, obstacles, margin):
+        return [start, goal]
+    
+    print("Starting Dijkstra path planning...")
+    start_time = time.time()
+    
+    # Convert to tuples for hashability
+    start = tuple(start)
+    goal = tuple(goal)
+    
+    # Grid resolution and boundaries
+    resolution = 1.0  # meters
+    
+    # Determine grid bounds
+    bounds_min = [-15, -15, 0]
+    bounds_max = [15, 15, 10]
+    
+    # Directions for 3D movement - 6 primary directions + diagonals
+    directions = [
+        (resolution, 0, 0), (-resolution, 0, 0),  # East, West
+        (0, resolution, 0), (0, -resolution, 0),  # North, South
+        (0, 0, resolution), (0, 0, -resolution)   # Up, Down
+    ]
+    
+    # Add diagonal movements in the horizontal plane
+    diagonals = [
+        (resolution, resolution, 0), (resolution, -resolution, 0),
+        (-resolution, resolution, 0), (-resolution, -resolution, 0)
+    ]
+    directions.extend(diagonals)
+    
+    # Dijkstra data structures
+    from heapq import heappush, heappop
+    
+    # Priority queue for nodes to explore
+    queue = []
+    
+    # Set of visited nodes
+    visited = set()
+    
+    # Distance from start to each node
+    distance = {start: 0}
+    
+    # For path reconstruction
+    previous = {}
+    
+    # Start with the start node
+    heappush(queue, (0, start))
+    
+    # For profiling
+    nodes_evaluated = 0
+    
+    # Dijkstra's algorithm
+    while queue:
+        # Get node with smallest distance
+        dist, current = heappop(queue)
+        nodes_evaluated += 1
+        
+        # If we reached the goal or very close to it
+        if np.linalg.norm(np.array(current) - np.array(goal)) < resolution:
+            path = [goal]
+            while current in previous:
+                path.append(current)
+                current = previous[current]
+            path.reverse()
+            
+            end_time = time.time()
+            print(f"Dijkstra path found with {len(path)} waypoints")
+            print(f"Dijkstra search evaluated {nodes_evaluated} nodes in {end_time - start_time:.3f} seconds")
+            
+            # Convert tuples back to lists
+            return [list(p) for p in path]
+        
+        # Skip if already visited
+        if current in visited:
+            continue
+        
+        # Mark as visited
+        visited.add(current)
+        
+        # Explore neighbors
+        for dx, dy, dz in directions:
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+            
+            # Skip if outside bounds
+            if (neighbor[0] < bounds_min[0] or neighbor[0] > bounds_max[0] or
+                neighbor[1] < bounds_min[1] or neighbor[1] > bounds_max[1] or
+                neighbor[2] < bounds_min[2] or neighbor[2] > bounds_max[2]):
+                continue
+            
+            # Skip if already visited
+            if neighbor in visited:
+                continue
+            
+            # Check if neighbor is in an obstacle
+            in_obstacle = False
+            for obs_id, obs in obstacles.items():
+                obs_pos = np.array([obs['x'], obs['y'], obs['z']])
+                obs_size = np.array([obs['w'], obs['d'], obs['h']]) / 2 + margin
+                
+                if (abs(neighbor[0] - obs_pos[0]) < obs_size[0] and
+                    abs(neighbor[1] - obs_pos[1]) < obs_size[1] and
+                    abs(neighbor[2] - obs_pos[2]) < obs_size[2]):
+                    in_obstacle = True
+                    break
+            
+            if in_obstacle:
+                continue
+            
+            # Check if direct path to neighbor is collision-free
+            if not is_collision_free(current, neighbor, obstacles, margin):
+                continue
+            
+            # Calculate new distance
+            new_distance = distance[current] + np.linalg.norm(np.array(neighbor) - np.array(current))
+            
+            # Update if this path is better
+            if neighbor not in distance or new_distance < distance[neighbor]:
+                distance[neighbor] = new_distance
+                previous[neighbor] = current
+                heappush(queue, (new_distance, neighbor))
+    
+    # If no path found
+    end_time = time.time()
+    print(f"Dijkstra search failed to find a path. Returning direct path. (in {end_time - start_time:.3f} seconds)")
+    return [list(start), list(goal)]
+
+
+def rrt_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, max_iterations=5000, step_size=1.0):
+    """
+    Implement RRT (Rapidly-exploring Random Tree) for path planning.
+    
+    :param start: 3D start point [x, y, z]
+    :param goal: 3D end point [x, y, z]
+    :param obstacles: Dictionary of obstacles with position and dimensions
+    :param margin: Safety margin around obstacles in meters
+    :param max_iterations: Maximum number of iterations for RRT
+    :param step_size: Step size for extending the tree
+    :return: List of waypoints including start and goal
+    """
+    # Check if direct path is possible
+    if is_collision_free(start, goal, obstacles, margin):
+        return [start, goal]
+    
+    print("Starting RRT path planning...")
+    start_time = time.time()
+    
+    # Convert to numpy arrays
+    start_np = np.array(start)
+    goal_np = np.array(goal)
+    
+    # Bounds for random sampling
+    bounds_min = np.array([-15, -15, 0])
+    bounds_max = np.array([15, 15, 10])
+    
+    # Goal bias - probability of sampling the goal
+    goal_bias = 0.1
+    
+    # Tree structure: vertices and edges
+    vertices = [start_np]
+    edges = {}  # parent -> child mapping for path reconstruction
+    
+    # For profiling
+    iterations = 0
+    
+    # Main RRT loop
+    for i in range(max_iterations):
+        iterations += 1
+        
+        # Sample random point or goal with some probability
+        if np.random.random() < goal_bias:
+            random_point = goal_np
+        else:
+            random_point = np.array([
+                np.random.uniform(bounds_min[0], bounds_max[0]),
+                np.random.uniform(bounds_min[1], bounds_max[1]),
+                np.random.uniform(bounds_min[2], bounds_max[2])
+            ])
+        
+        # Find nearest vertex in the tree
+        nearest_idx = np.argmin([np.linalg.norm(v - random_point) for v in vertices])
+        nearest = vertices[nearest_idx]
+        
+        # Steer towards random point with limited step size
+        direction = random_point - nearest
+        distance = np.linalg.norm(direction)
+        
+        if distance > 0:
+            direction = direction / distance  # Normalize
+            
+            # Limit step size
+            new_point = nearest + direction * min(step_size, distance)
+            
+            # Check if the new point is collision-free
+            if not is_collision_free(nearest, new_point, obstacles, margin):
+                continue
+            
+            # Add new point to the tree
+            vertices.append(new_point)
+            edges[len(vertices) - 1] = nearest_idx
+            
+            # Check if we can connect to goal
+            if np.linalg.norm(new_point - goal_np) < step_size and is_collision_free(new_point, goal_np, obstacles, margin):
+                # Path found! Reconstruct the path
+                path = [goal_np]
+                current_idx = len(vertices) - 1
+                
+                while current_idx != 0:  # Until we reach the start
+                    path.append(vertices[current_idx])
+                    current_idx = edges[current_idx]
+                
+                path.append(start_np)
+                path.reverse()
+                
+                # Path smoothing - optional but recommended for RRT
+                smoothed_path = path_smoothing(path, obstacles, margin)
+                
+                end_time = time.time()
+                print(f"RRT path found in {iterations} iterations")
+                print(f"RRT path has {len(smoothed_path)} waypoints")
+                print(f"RRT search completed in {end_time - start_time:.3f} seconds")
+                
+                # Convert numpy arrays to lists
+                return [p.tolist() for p in smoothed_path]
+    
+    # If no path found after max iterations
+    end_time = time.time()
+    print(f"RRT failed to find a path after {max_iterations} iterations. Returning direct path. (in {end_time - start_time:.3f} seconds)")
+    return [start, goal]
+
+
+def path_smoothing(path, obstacles, margin, max_iterations=50):
+    """
+    Smooth a path by removing unnecessary waypoints while keeping it collision-free.
+    
+    :param path: List of waypoints
+    :param obstacles: Dictionary of obstacles with position and dimensions
+    :param margin: Safety margin around obstacles
+    :param max_iterations: Maximum number of smoothing iterations
+    :return: Smoothed path
+    """
+    if len(path) <= 2:
+        return path
+    
+    smoothed_path = path.copy()
+    
+    # Iteratively try to remove waypoints
+    for _ in range(max_iterations):
+        # Start with a random index (not the start or goal)
+        if len(smoothed_path) <= 2:
+            break
+            
+        i = np.random.randint(1, len(smoothed_path) - 1)
+        
+        # Try to remove the waypoint by checking if direct path is collision-free
+        if is_collision_free(smoothed_path[i-1], smoothed_path[i+1], obstacles, margin):
+            smoothed_path.pop(i)
+    
+    return smoothed_path
 
 
 def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_PATH_PLANNING, astar_implementation=DEFAULT_ASTAR_IMPLEMENTATION):
@@ -526,6 +809,10 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
             return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
     elif method == 'a_star':
         return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
+    elif method == 'dijkstra':
+        return dijkstra_path_planning(start_pos, goal_pos, obstacles)
+    elif method == 'rrt':
+        return rrt_path_planning(start_pos, goal_pos, obstacles)
     else:
         # Default to A* path planning
         return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
@@ -875,75 +1162,70 @@ def main():
     """Main function."""
     args = parse_args()
     
-    try:
-        # Read scenario file
-        scenario = read_scenario(args.scenario)
-        if not scenario:
-            print("Failed to read scenario file")
-            return
-        
-        # Create logger if needed
-        logger = None
-        if args.log_dir:
-            from mission_logger import MissionLogger
-            os.makedirs(args.log_dir, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            log_file = os.path.join(args.log_dir, f"mission_log_{timestamp}.txt")
-            logger = MissionLogger(log_file=log_file)
-            logger.set_scenario_info(os.path.basename(args.scenario), args.path_planning, args.tsp_method)
-        
-        # Visualize scenario if requested
-        if args.visualize:
-            visualize_scenario(scenario)
-        
-        # Initialize ROS and drone interface
-        rclpy.init(args=args.ros_args)
-        
-        if args.detect_markers:
-            # Use the ArUco detector drone interface
-            from drone_camera import ArucoDetectorDrone
-            drone_interface = ArucoDetectorDrone(
-                drone_id=args.namespace,
-                verbose=args.verbose,
-                use_sim_time=args.use_sim_time
-            )
-        else:
-            # Use the standard drone interface
-            from as2_python_api.drone_interface import DroneInterface
-            drone_interface = DroneInterface(
-                drone_id=args.namespace,
-                verbose=args.verbose,
-                use_sim_time=args.use_sim_time
-            )
-        
-        # Run the mission
-        drone_start(drone_interface, logger)
-        
-        mission_success = drone_run(
-            drone_interface, 
-            scenario, 
-            path_planning=args.path_planning, 
-            tsp_method=args.tsp_method,
-            matrix_method=args.matrix_method,
-            astar_implementation=args.astar_implementation,
-            logger=logger
-        )
-        
-        drone_end(drone_interface, logger)
-        
-        # Save mission report
-        if logger:
-            report_file = os.path.join(args.log_dir, f"mission_report_{timestamp}.json")
-            logger.save_mission_report(report_file)
-        
-        rclpy.shutdown()
-        
-        return 0 if mission_success else 1
+    # Read scenario file
+    scenario = read_scenario(args.scenario)
+    if not scenario:
+        print("Failed to read scenario file")
+        return
     
-    except Exception as e:
-        print(f"Error during mission: {str(e)}")
-        traceback.print_exc()
-        return 1
+    # Create logger if needed
+    logger = None
+    if args.log_dir:
+        from mission_logger import MissionLogger
+        os.makedirs(args.log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        log_file = os.path.join(args.log_dir, f"mission_log_{timestamp}.txt")
+        logger = MissionLogger(log_file=log_file)
+        logger.set_scenario_info(os.path.basename(args.scenario), args.path_planning, args.tsp_method)
+    
+    # Visualize scenario if requested
+    if args.visualize:
+        visualize_scenario(scenario)
+    
+    # Initialize ROS and drone interface
+    rclpy.init(args=args.ros_args)
+    
+    if args.detect_markers:
+        # Use the ArUco detector drone interface
+        from drone_camera import ArucoDetectorDrone
+        drone_interface = ArucoDetectorDrone(
+            drone_id=args.namespace,
+            verbose=args.verbose,
+            use_sim_time=args.use_sim_time
+        )
+    else:
+        # Use the standard drone interface
+        from as2_python_api.drone_interface import DroneInterface
+        drone_interface = DroneInterface(
+            drone_id=args.namespace,
+            verbose=args.verbose,
+            use_sim_time=args.use_sim_time
+        )
+    
+    # Run the mission
+    drone_start(drone_interface, logger)
+    
+    mission_success = drone_run(
+        drone_interface, 
+        scenario, 
+        path_planning=args.path_planning, 
+        tsp_method=args.tsp_method,
+        matrix_method=args.matrix_method,
+        astar_implementation=args.astar_implementation,
+        logger=logger
+    )
+    
+    drone_end(drone_interface, logger)
+    
+    # Save mission report
+    if logger:
+        report_file = os.path.join(args.log_dir, f"mission_report_{timestamp}.json")
+        logger.save_mission_report(report_file)
+    
+    rclpy.shutdown()
+    
+    return 0 if mission_success else 1
+    
 
 def parse_args():
     """Parse command line arguments."""
@@ -956,9 +1238,10 @@ def parse_args():
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('-s', '--use_sim_time', action='store_true', help='Use simulation time')
     parser.add_argument('-p', '--path_planning', default=DEFAULT_PATH_PLANNING, 
-                        choices=['direct', 'a_star'], help='Path planning method to use')
+                        choices=PATH_PLANNING_METHODS, 
+                        help='Path planning method to use')
     parser.add_argument('-t', '--tsp_method', default=DEFAULT_TSP_METHOD, 
-                        choices=['dynamic_programming', 'simulated_annealing', 'local_search'], 
+                        choices=TSP_METHODS, 
                         help='TSP solver method to use')
     parser.add_argument('-m', '--matrix_method', default=DEFAULT_TSP_MATRIX_METHOD, 
                         choices=['euclidean', 'pathplanning'], 
