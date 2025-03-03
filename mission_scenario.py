@@ -62,7 +62,7 @@ TAKE_OFF_SPEED = 1.0  # Max speed in m/s
 SLEEP_TIME = 0.5  # Sleep time between behaviors in seconds
 SPEED = 1.0  # Max speed in m/s
 LAND_SPEED = 0.5  # Max speed in m/s
-SCAN_DURATION = 2.0  # Duration to scan for ArUco markers at each waypoint
+SCAN_DURATION = 5.0  # Duration to scan for ArUco markers at each waypoint (increased from 2.0)
 OBSTACLE_SAFETY_MARGIN = 0.5  # Safety margin around obstacles in meters
 WAYPOINT_TOLERANCE = 0.1  # Distance tolerance for waypoint achievement in meters
 
@@ -73,6 +73,9 @@ DEFAULT_PATH_PLANNING = 'a_star'
 # TSP solver methods
 TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search']
 DEFAULT_TSP_METHOD = 'simulated_annealing'
+
+# Default parameters
+DEFAULT_TSP_MATRIX_METHOD = 'euclidean'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
 
 
 def drone_start(drone_interface: DroneInterface, logger=None) -> bool:
@@ -226,61 +229,96 @@ def a_star_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
         return [start, goal]
 
 
-def calculate_tsp_matrix(viewpoints, obstacles, path_planning_method=DEFAULT_PATH_PLANNING):
+def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX_METHOD, path_planning_method=DEFAULT_PATH_PLANNING):
     """
     Calculate distance matrix for TSP optimization.
     
     :param viewpoints: Dictionary of viewpoints with position information
     :param obstacles: Dictionary of obstacles with position and dimensions
-    :param path_planning_method: Method to use for path planning
-    :return: Distance matrix for TSP solver
+    :param matrix_method: Method to calculate TSP matrix distances: 'euclidean' or 'pathplanning'
+    :param path_planning_method: Method to use for path planning if matrix_method='pathplanning'
+    :return: 2D numpy array containing distances between all viewpoints
     """
-    # Get all 3D positions
-    positions = []
-    for vp_id, vp in viewpoints.items():
-        positions.append([vp['x'], vp['y'], vp['z']])
+    print(f"Starting TSP matrix calculation using method: {matrix_method}")
+    matrix_start_time = time.time()
     
-    n = len(positions)
+    viewpoint_ids = list(viewpoints.keys())
+    n = len(viewpoint_ids)
     distance_matrix = np.zeros((n, n))
     
-    # Calculate distances between all pairs of positions
+    # Calculate distances between all pairs of viewpoints
     for i in range(n):
+        vp_i = viewpoints[viewpoint_ids[i]]
+        pos_i = [vp_i["x"], vp_i["y"], vp_i["z"]]
+        
         for j in range(i+1, n):
-            if path_planning_method == 'direct':
-                # Direct Euclidean distance
-                dist = np.linalg.norm(np.array(positions[i]) - np.array(positions[j]))
-            elif path_planning_method == 'a_star':
-                # A* path planning distance
-                path = a_star_path_planning(positions[i], positions[j], obstacles)
-                # Calculate total path length
-                dist = 0
-                for k in range(len(path) - 1):
-                    dist += np.linalg.norm(np.array(path[k]) - np.array(path[k+1]))
+            vp_j = viewpoints[viewpoint_ids[j]]
+            pos_j = [vp_j["x"], vp_j["y"], vp_j["z"]]
+            
+            # Calculate the distance based on the selected method
+            if matrix_method == 'euclidean':
+                # Simple Euclidean distance without considering obstacles
+                dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
+            elif matrix_method == 'pathplanning':
+                # Use path planning to calculate distances considering obstacles
+                if is_collision_free(pos_i, pos_j, obstacles):
+                    # Direct distance if path is collision-free
+                    dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
+                else:
+                    # Path planning distance
+                    path = plan_path_between_viewpoints(pos_i, pos_j, obstacles, method=path_planning_method)
+                    if path:
+                        # Calculate path length
+                        dist = 0
+                        for k in range(len(path) - 1):
+                            leg_distance = np.linalg.norm(np.array(path[k+1]) - np.array(path[k]))
+                            dist += leg_distance
+                    else:
+                        # If no path found, use a large value
+                        dist = 1000.0
             else:
                 # Default to Euclidean distance
-                dist = np.linalg.norm(np.array(positions[i]) - np.array(positions[j]))
+                print(f"Warning: Unknown matrix method '{matrix_method}', defaulting to Euclidean distance")
+                dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
             
+            # Update distance matrix
             distance_matrix[i, j] = dist
             distance_matrix[j, i] = dist
+    
+    matrix_end_time = time.time()
+    matrix_calculation_time = matrix_end_time - matrix_start_time
+    print(f"TSP matrix calculation completed in {matrix_calculation_time:.2f} seconds.")
     
     return distance_matrix
 
 
 def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHOD, 
-                           path_planning_method=DEFAULT_PATH_PLANNING):
+                           matrix_method=DEFAULT_TSP_MATRIX_METHOD, path_planning_method=DEFAULT_PATH_PLANNING):
     """
     Optimize the order of viewpoints using TSP solver.
     
     :param viewpoints: Dictionary of viewpoints with position information
     :param obstacles: Dictionary of obstacles with position and dimensions
     :param tsp_method: Method to use for TSP solving
-    :param path_planning_method: Method to use for path planning
+    :param matrix_method: Method to calculate TSP matrix distances: 'euclidean' or 'pathplanning'
+    :param path_planning_method: Method to use for path planning if matrix_method='pathplanning'
     :return: Optimized list of viewpoint IDs
     """
+    print(f"Starting viewpoint order optimization with {len(viewpoints)} viewpoints...")
+    print(f"Matrix calculation method: {matrix_method}")
+    print(f"TSP solver method: {tsp_method}")
+    if matrix_method == 'pathplanning':
+        print(f"Path planning method for matrix: {path_planning_method}")
+    
+    total_start_time = time.time()
+    
     # Calculate TSP distance matrix
-    distance_matrix = calculate_tsp_matrix(viewpoints, obstacles, path_planning_method)
+    distance_matrix = calculate_tsp_matrix(viewpoints, obstacles, matrix_method, path_planning_method)
     
     # Solve TSP
+    print(f"Solving TSP using {tsp_method} method...")
+    solve_start_time = time.time()
+    
     if tsp_method == 'dynamic_programming':
         permutation, distance = solve_tsp_dynamic_programming(distance_matrix)
     elif tsp_method == 'simulated_annealing':
@@ -291,9 +329,19 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
         # Default to simulated annealing
         permutation, distance = solve_tsp_simulated_annealing(distance_matrix)
     
+    solve_end_time = time.time()
+    solve_time = solve_end_time - solve_start_time
+    
     # Get ordered viewpoint IDs
     viewpoint_ids = list(viewpoints.keys())
     optimized_ids = [viewpoint_ids[i] for i in permutation]
+    
+    total_end_time = time.time()
+    total_time = total_end_time - total_start_time
+    
+    print(f"TSP solved in {solve_time:.2f} seconds.")
+    print(f"Total optimization time: {total_time:.2f} seconds.")
+    print(f"Optimized path length: {distance:.2f} units.")
     
     return optimized_ids, distance
 
@@ -322,22 +370,60 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
         return a_star_path_planning(start_pos, goal_pos, obstacles)
 
 
+def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
+    """
+    Convert a list of waypoints to a Path message for follow_path.
+    
+    :param waypoints: List of [x, y, z] positions
+    :param frame_id: Reference frame ID for the path
+    :return: Path message
+    """
+    from nav_msgs.msg import Path
+    from geometry_msgs.msg import PoseStamped
+    from std_msgs.msg import Header
+    import rclpy.time
+    
+    path_msg = Path()
+    path_msg.header.frame_id = frame_id
+    path_msg.header.stamp = rclpy.time.Time().to_msg()
+    
+    for waypoint in waypoints:
+        pose = PoseStamped()
+        pose.header.frame_id = frame_id
+        pose.header.stamp = rclpy.time.Time().to_msg()
+        pose.pose.position.x = float(waypoint[0])
+        pose.pose.position.y = float(waypoint[1])
+        pose.pose.position.z = float(waypoint[2])
+        # Orientation will be handled by the yaw_mode in follow_path
+        pose.pose.orientation.w = 1.0
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = 0.0
+        
+        path_msg.poses.append(pose)
+    
+    return path_msg
+
+
 def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING, 
-             tsp_method=DEFAULT_TSP_METHOD, graph_type='full', logger=None) -> bool:
+             tsp_method=DEFAULT_TSP_METHOD, matrix_method=DEFAULT_TSP_MATRIX_METHOD, 
+             graph_type='full', logger=None) -> bool:
     """
     Run the mission for a single drone using path planning and TSP optimization.
 
     :param drone_interface: DroneInterface object
     :param scenario: Dictionary containing scenario information
-    :param path_planning: Path planning method to use
+    :param path_planning: Path planning method to use for actual navigation
     :param tsp_method: TSP solver method to use
+    :param matrix_method: Method to calculate TSP matrix distances: 'euclidean' or 'pathplanning'
     :param graph_type: Type of graph representation to use
     :param logger: Optional logger for mission logging
     :return: Bool indicating if the mission was successful
     """
     print('Run mission with path planning and TSP optimization')
     if logger:
-        logger.info(f'Starting mission with path planning: {path_planning}, TSP: {tsp_method}')
+        logger.info(f'Starting mission with path planning: {path_planning}, ' 
+                    f'TSP: {tsp_method}, Matrix method: {matrix_method}')
     
     # Get viewpoints and obstacles from scenario
     viewpoints = scenario.get("viewpoint_poses", {})
@@ -353,7 +439,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     visited_markers = set()
     
     # Get current drone position as starting point
-    current_pos = drone_interface.position
+    current_pos = drone_interface.position #This is right， stick to it
     if current_pos is None:
         print("Unable to get current drone position")
         if logger:
@@ -361,9 +447,9 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         return False
     
     # Optimize viewpoint order using TSP
-    print(f"Optimizing viewpoint order using {tsp_method} TSP solver")
+    print(f"Optimizing viewpoint order using {tsp_method} TSP solver and {matrix_method} distance calculation")
     optimized_ids, estimated_distance = optimize_viewpoint_order(
-        viewpoints, obstacles, tsp_method, path_planning)
+        viewpoints, obstacles, tsp_method, matrix_method, path_planning)
     print(f"Optimized order: {optimized_ids}")
     print(f"Estimated total distance: {estimated_distance:.2f} meters")
     
@@ -381,7 +467,8 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         if logger:
             logger.info(f"Moving to viewpoint {vp_id} at position {goal_pos}")
         
-        # Plan path to the next viewpoint
+        # Plan path to the next viewpoint - always using the specified path planning method
+        # This is where we use A* or other path planning methods regardless of how TSP was calculated
         path = plan_path_between_viewpoints(
             current_pos, goal_pos, obstacles, method=path_planning)
         
@@ -401,27 +488,37 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         if logger:
             logger.info(f"Path planned with {len(path)} waypoints, distance: {path_distance:.2f}m")
         
-        # If path has intermediate waypoints, navigate through them
-        if len(path) > 2:
-            # Navigate through intermediate waypoints
-            for i, waypoint in enumerate(path[1:-1]):
-                print(f"Moving to intermediate waypoint {i+1}/{len(path)-2}")
-                success = drone_interface.go_to.go_to_point(waypoint, speed=SPEED)
-                if not success:
-                    print(f"Failed to reach intermediate waypoint {i+1}")
-                    if logger:
-                        logger.warning(f"Failed to reach intermediate waypoint {i+1}")
-                sleep(SLEEP_TIME)
+        # Convert waypoints to Path message for follow_path
+        path_msg = convert_waypoints_to_path_msg(path)
         
-        # Move to final waypoint with desired orientation
-        print(f"Moving to viewpoint {vp_id} with yaw {vp_yaw}")
+        # Follow path to the waypoint (keep original yaw during path)
+        print(f"Following path to viewpoint {vp_id}")
+        from as2_msgs.msg import YawMode
+        
+        # First follow path with KEEP_YAW to reach the position
+        success = drone_interface.follow_path(
+            path=path_msg,
+            speed=SPEED,
+            frame_id='earth',
+            yaw_mode=YawMode.KEEP_YAW,
+            yaw_angle=float(vp_yaw),
+            wait=True
+        )
+        
+        if not success:
+            print(f"Failed to follow path to viewpoint {vp_id}")
+            if logger:
+                logger.error(f"Failed to follow path to viewpoint {vp_id}")
+            continue
+        
+        # Then rotate to the desired yaw at the final position
+        print(f"Adjusting yaw at viewpoint {vp_id} to {vp_yaw}")
         success = drone_interface.go_to.go_to_point_with_yaw(goal_pos, angle=vp_yaw, speed=SPEED)
         
         if not success:
-            print(f"Failed to reach viewpoint {vp_id}")
+            print(f"Failed to adjust yaw at viewpoint {vp_id}")
             if logger:
-                logger.error(f"Failed to reach viewpoint {vp_id}")
-            continue
+                logger.warning(f"Failed to adjust yaw at viewpoint {vp_id}, continuing mission")
         
         # Update current position
         current_pos = goal_pos
@@ -429,11 +526,24 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         
         # Detect ArUco markers at this viewpoint
         if isinstance(drone_interface, ArucoDetectorDrone):
-            print(f"Scanning for ArUco markers at viewpoint {vp_id}")
+            # Add a short delay to ensure the drone is stable and camera feed is updated
+            print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
+            sleep(1.0)
+            
+            # Print current drone position and orientation for debugging
+            current_pos = drone_interface.get_position()
+            current_orientation = drone_interface.get_orientation()
+            print(f"Current drone position: {current_pos}")
+            print(f"Current drone orientation: {current_orientation}")
+            
+            print(f"Scanning for ArUco markers at viewpoint {vp_id} for {SCAN_DURATION} seconds...")
             if logger:
                 logger.info(f"Scanning for ArUco markers at viewpoint {vp_id}")
             
             detected = drone_interface.scan_for_markers(duration=SCAN_DURATION)
+            
+            # Log results with more details
+            print(f"Scan completed at viewpoint {vp_id}")
             if detected:
                 visited_markers.update(detected)
                 print(f"Detected markers: {detected}")
@@ -441,6 +551,10 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
                 if logger:
                     logger.info(f"Detected markers at viewpoint {vp_id}: {detected}")
                     logger.info(f"Total markers detected so far: {len(visited_markers)}")
+            else:
+                print(f"No markers detected at viewpoint {vp_id}, check camera positioning and lighting")
+                if logger:
+                    logger.warning(f"No markers detected at viewpoint {vp_id}")
         
         print(f"Viewpoint {vp_id} visited successfully")
         sleep(SLEEP_TIME)
@@ -593,103 +707,107 @@ def visualize_scenario(scenario, path=None, save_path=None):
     plt.show()
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Single drone mission with path planning and TSP optimization')
-
-    parser.add_argument('scenario', type=str, help="scenario file to attempt to execute")
-    parser.add_argument('-n', '--namespace',
-                        type=str,
-                        default='drone0',
-                        help='ID of the drone to be used in the mission')
-    parser.add_argument('-v', '--verbose',
-                        action='store_true',
-                        default=False,
-                        help='Enable verbose output')
-    parser.add_argument('-s', '--use_sim_time',
-                        action='store_true',
-                        default=True,
-                        help='Use simulation time')
-    parser.add_argument('-p', '--path_planning',
-                        type=str,
-                        choices=PATH_PLANNING_METHODS,
-                        default=DEFAULT_PATH_PLANNING,
-                        help='Path planning method to use')
-    parser.add_argument('-t', '--tsp_method',
-                        type=str,
-                        choices=TSP_METHODS,
-                        default=DEFAULT_TSP_METHOD,
-                        help='TSP solver method to use')
-    parser.add_argument('--visualize',
-                        action='store_true',
-                        default=False,
-                        help='Visualize the scenario and planned path')
-    parser.add_argument('--log_dir',
-                        type=str,
-                        default='logs',
-                        help='Directory to store mission logs and visualizations')
-
-    args = parser.parse_args()
-    drone_namespace = args.namespace
-    verbosity = args.verbose
-    use_sim_time = args.use_sim_time
-
-    print(f'Running mission for drone {drone_namespace}')
-
-    print(f"Reading scenario {args.scenario}")
-    scenario = read_scenario(args.scenario)
-    if not scenario:
-        print(f"Error reading scenario: {args.scenario}")
-        exit(1)
-
-    # Create log directory if it doesn't exist
-    if not os.path.exists(args.log_dir):
-        os.makedirs(args.log_dir)
-
-    # ROS2 initialization
-    rclpy.init()
-
-    # Create drone interface with ArUco detection capabilities
+def main():
+    """Main function."""
+    args = parse_args()
+    
     try:
-        uav = ArucoDetectorDrone(
-            drone_id=drone_namespace,
-            use_sim_time=use_sim_time,
-            verbose=verbosity)
-        print("Using drone with ArUco detection capabilities")
-    except ImportError:
-        uav = DroneInterface(
-            drone_id=drone_namespace,
-            use_sim_time=use_sim_time,
-            verbose=verbosity)
-        print("Using standard drone interface (no ArUco detection)")
-
-    # Start, run, and end mission
-    success = drone_start(uav)
-    try:
-        start_time = time.time()
-        if success:
-            success = drone_run(
-                uav, 
-                scenario, 
-                path_planning=args.path_planning,
-                tsp_method=args.tsp_method
+        # Read scenario file
+        scenario = read_scenario(args.scenario)
+        if not scenario:
+            print("Failed to read scenario file")
+            return
+        
+        # Create logger if needed
+        logger = None
+        if args.log_dir:
+            from mission_logger import MissionLogger
+            os.makedirs(args.log_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            log_file = os.path.join(args.log_dir, f"mission_log_{timestamp}.txt")
+            logger = MissionLogger(log_file=log_file)
+            logger.set_scenario_info(os.path.basename(args.scenario), args.path_planning, args.tsp_method)
+        
+        # Visualize scenario if requested
+        if args.visualize:
+            visualize_scenario(scenario)
+        
+        # Initialize ROS and drone interface
+        rclpy.init(args=args.ros_args)
+        
+        if args.detect_markers:
+            # Use the ArUco detector drone interface
+            from drone_camera import ArucoDetectorDrone
+            drone_interface = ArucoDetectorDrone(
+                drone_id=args.namespace,
+                verbose=args.verbose,
+                use_sim_time=args.use_sim_time
             )
-        duration = time.time() - start_time
-        print("---------------------------------")
-        print(f"Tour of {args.scenario} took {duration} seconds")
-        print("---------------------------------")
-    except KeyboardInterrupt:
-        print("Mission interrupted by user")
+        else:
+            # Use the standard drone interface
+            from as2_python_api.drone_interface import DroneInterface
+            drone_interface = DroneInterface(
+                drone_id=args.namespace,
+                verbose=args.verbose,
+                use_sim_time=args.use_sim_time
+            )
+        
+        # Run the mission
+        drone_start(drone_interface, logger)
+        
+        mission_success = drone_run(
+            drone_interface, 
+            scenario, 
+            path_planning=args.path_planning, 
+            tsp_method=args.tsp_method,
+            matrix_method=args.matrix_method,
+            logger=logger
+        )
+        
+        drone_end(drone_interface, logger)
+        
+        # Save mission report
+        if logger:
+            report_file = os.path.join(args.log_dir, f"mission_report_{timestamp}.json")
+            logger.save_mission_report(report_file)
+        
+        rclpy.shutdown()
+        
+        return 0 if mission_success else 1
+    
     except Exception as e:
         print(f"Error during mission: {str(e)}")
-        import traceback
         traceback.print_exc()
-    finally:
-        # Always try to land the drone
-        success = drone_end(uav)
+        return 1
 
-    # Shutdown ROS2
-    uav.shutdown()
-    rclpy.shutdown()
-    print('Clean exit')
-    exit(0)
+def parse_args():
+    """Parse command line arguments."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='UAV Mission Planning')
+    
+    parser.add_argument('scenario', help='Path to scenario YAML file')
+    parser.add_argument('-n', '--namespace', default='drone0', help='Drone namespace')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('-s', '--use_sim_time', action='store_true', help='Use simulation time')
+    parser.add_argument('-p', '--path_planning', default=DEFAULT_PATH_PLANNING, 
+                        choices=['direct', 'a_star'], help='Path planning method to use')
+    parser.add_argument('-t', '--tsp_method', default=DEFAULT_TSP_METHOD, 
+                        choices=['dynamic_programming', 'simulated_annealing', 'local_search'], 
+                        help='TSP solver method to use')
+    parser.add_argument('-m', '--matrix_method', default=DEFAULT_TSP_MATRIX_METHOD, 
+                        choices=['euclidean', 'pathplanning'], 
+                        help='Method to calculate TSP distances: euclidean or pathplanning')
+    parser.add_argument('--visualize', action='store_true', help='Visualize the scenario')
+    parser.add_argument('--detect_markers', action='store_true', help='Enable ArUco marker detection')
+    parser.add_argument('--log_dir', default=None, help='Directory to store mission logs')
+    
+    # Parse ROS args too
+    args, ros_args = parser.parse_known_args()
+    args.ros_args = ros_args
+    
+    return args
+
+
+if __name__ == '__main__':
+    main()

@@ -52,12 +52,12 @@ class ArucoDetectorDrone(DroneInterface):
         # Subscribe to camera feed
         self.create_subscription(
             Image, 
-            f"{drone_id}/sensor_measurements/hd_camera/image_raw", 
+            "sensor_measurements/hd_camera/image_raw", 
             self.camera_callback, 
             qos_profile_sensor_data
         )
         
-        print(f"Camera subscription initiated for {drone_id}/sensor_measurements/hd_camera/image_raw")
+        print(f"Camera subscription initiated for sensor_measurements/hd_camera/image_raw")
 
     def camera_callback(self, msg):
         """
@@ -69,9 +69,11 @@ class ArucoDetectorDrone(DroneInterface):
             # Convert ROS Image message to OpenCV format
             with self.image_lock:
                 self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+                #print(f"Received camera image, shape: {self.current_image.shape if self.current_image is not None else None}")
                 
         except Exception as e:
             self.get_logger().error(f"Error processing camera image: {str(e)}")
+            print(f"Error processing camera image: {str(e)}")
 
     def detect_aruco_markers(self, display_image=False, timeout=3.0):
         """
@@ -89,19 +91,35 @@ class ArucoDetectorDrone(DroneInterface):
                 if self.current_image is not None:
                     # Make a copy of the image to avoid threading issues
                     image = self.current_image.copy()
+                    print(f"Got image for processing, shape: {image.shape}")
                     break
             time.sleep(0.1)
         else:
             self.get_logger().warning("Timeout waiting for camera image")
+            print("Timeout waiting for camera image - no image received within timeout period")
             return set()
         
         # Detect ArUco markers using older OpenCV API
-        corners, ids, rejected = cv2.aruco.detectMarkers(
-            image, self.aruco_dict, parameters=self.aruco_params)
+        try:
+            # Add debugging info about image
+            print(f"Processing image for ArUco detection, image shape: {image.shape}, dtype: {image.dtype}")
+            
+            # Apply some preprocessing to help with detection
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            # Apply adaptive thresholding to help with marker detection
+            # gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                gray, self.aruco_dict, parameters=self.aruco_params)
+            
+            print(f"ArUco detection complete: found {len(corners) if corners else 0} markers")
+        except Exception as e:
+            print(f"Error during ArUco detection: {str(e)}")
+            return set()
         
         # Process results
         detected_ids = set()
-        if ids is not None:
+        if ids is not None and len(ids) > 0:
             for marker_id in ids.flatten():
                 detected_ids.add(int(marker_id))
                 self.detected_markers.add(int(marker_id))
@@ -118,8 +136,10 @@ class ArucoDetectorDrone(DroneInterface):
         # Log detection results
         if detected_ids:
             self.get_logger().info(f"Detected ArUco markers: {detected_ids}")
+            print(f"Successfully detected ArUco markers: {detected_ids}")
         else:
             self.get_logger().info("No ArUco markers detected")
+            print("No ArUco markers detected in this frame")
             
         return detected_ids
     
@@ -132,13 +152,17 @@ class ArucoDetectorDrone(DroneInterface):
         :return: Set of all marker IDs detected during scan
         """
         self.get_logger().info(f"Scanning for ArUco markers for {duration} seconds...")
+        print(f"Starting {duration} second scan for ArUco markers...")
         
         all_detected = set()
         end_time = time.time() + duration
+        scan_count = 0
         
         # Scan until duration expires
         while time.time() < end_time:
             # Detect markers in current frame
+            scan_count += 1
+            print(f"Scan iteration {scan_count}")
             detected = self.detect_aruco_markers(display_image=display_image)
             all_detected.update(detected)
             
@@ -146,4 +170,5 @@ class ArucoDetectorDrone(DroneInterface):
             time.sleep(0.1)
             
         self.get_logger().info(f"Scan complete. Total markers detected: {len(all_detected)}")
+        print(f"Scan complete. Performed {scan_count} detection iterations. Total markers detected: {all_detected}")
         return all_detected 
