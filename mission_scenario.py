@@ -75,7 +75,8 @@ TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search']
 DEFAULT_TSP_METHOD = 'simulated_annealing'
 
 # Default parameters
-DEFAULT_TSP_MATRIX_METHOD = 'euclidean'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
+DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
+DEFAULT_ASTAR_IMPLEMENTATION = 'optimized'  # Default A* implementation: 'optimized' or 'networkx'
 
 
 def drone_start(drone_interface: DroneInterface, logger=None) -> bool:
@@ -156,9 +157,9 @@ def is_collision_free(start, end, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
     return True
 
 
-def a_star_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
+def a_star_path_planning_networkx(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
     """
-    Implement A* algorithm for path planning between viewpoints.
+    Implement A* algorithm for path planning using NetworkX.
     
     :param start: 3D start point [x, y, z]
     :param goal: 3D end point [x, y, z]
@@ -169,6 +170,9 @@ def a_star_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
     # Check if direct path is possible
     if is_collision_free(start, goal, obstacles, margin):
         return [start, goal]
+    
+    print("Starting NetworkX based A* path planning...")
+    start_time = time.time()
     
     # Create a 3D grid for path planning
     grid_resolution = 1.0  # 1 meter resolution
@@ -222,11 +226,167 @@ def a_star_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
     try:
         path = nx.astar_path(G, start_tuple, goal_tuple, heuristic=lambda a, b: np.linalg.norm(np.array(a) - np.array(b)))
         path = [list(p) for p in path]
+        end_time = time.time()
+        print(f"NetworkX A* path found with {len(path)} waypoints")
+        print(f"NetworkX A* search completed in {end_time - start_time:.3f} seconds")
         return path
     except nx.NetworkXNoPath:
         # If no path found, try with direct connection
-        print("A* could not find a path, returning direct connection")
+        end_time = time.time()
+        print(f"NetworkX A* could not find a path, returning direct connection (in {end_time - start_time:.3f} seconds)")
         return [start, goal]
+
+
+def a_star_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, implementation=DEFAULT_ASTAR_IMPLEMENTATION):
+    """
+    Implement A* algorithm for path planning between viewpoints.
+    
+    :param start: 3D start point [x, y, z]
+    :param goal: 3D end point [x, y, z]
+    :param obstacles: Dictionary of obstacles with position and dimensions
+    :param margin: Safety margin around obstacles in meters
+    :param implementation: Which A* implementation to use ('optimized' or 'networkx')
+    :return: List of waypoints including start and goal
+    """
+    # Redirect to the appropriate implementation
+    if implementation == 'networkx':
+        return a_star_path_planning_networkx(start, goal, obstacles, margin)
+    
+    # Default to optimized implementation
+    # Check if direct path is possible
+    if is_collision_free(start, goal, obstacles, margin):
+        return [start, goal]
+    
+    print("Starting optimized A* path planning...")
+    start_time = time.time()
+    
+    # Convert to tuples for hashability
+    start = tuple(start)
+    goal = tuple(goal)
+    
+    # Grid resolution and boundaries
+    resolution = 1.0  # meters
+    
+    # Determine grid bounds
+    bounds_min = [-15, -15, 0]
+    bounds_max = [15, 15, 10]
+    
+    # Directions for 3D movement - 6 primary directions (up, down, north, south, east, west)
+    # Can be extended to include diagonal movements if needed
+    directions = [
+        (resolution, 0, 0), (-resolution, 0, 0),  # East, West
+        (0, resolution, 0), (0, -resolution, 0),  # North, South
+        (0, 0, resolution), (0, 0, -resolution)   # Up, Down
+    ]
+    
+    # Add diagonal movements in the horizontal plane
+    diagonals = [
+        (resolution, resolution, 0), (resolution, -resolution, 0),
+        (-resolution, resolution, 0), (-resolution, -resolution, 0)
+    ]
+    directions.extend(diagonals)
+    
+    # A* data structures
+    from heapq import heappush, heappop
+    
+    # Open set - priority queue of nodes to be evaluated
+    open_set = []
+    
+    # Closed set - set of nodes already evaluated
+    closed_set = set()
+    
+    # g_score - cost from start to current node
+    g_score = {start: 0}
+    
+    # f_score - estimated total cost from start to goal through current node
+    f_score = {start: np.linalg.norm(np.array(start) - np.array(goal))}
+    
+    # came_from - for path reconstruction
+    came_from = {}
+    
+    # Add start node to open set
+    heappush(open_set, (f_score[start], start))
+    
+    # For profiling
+    nodes_evaluated = 0
+    
+    while open_set:
+        # Get node with lowest f_score
+        _, current = heappop(open_set)
+        nodes_evaluated += 1
+        
+        # Check if we've reached the goal
+        if np.linalg.norm(np.array(current) - np.array(goal)) < resolution:
+            # Reconstruct path
+            path = [goal]
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.reverse()
+            
+            end_time = time.time()
+            print(f"Optimized A* path found with {len(path)} waypoints")
+            print(f"Optimized A* search evaluated {nodes_evaluated} nodes in {end_time - start_time:.3f} seconds")
+            
+            # Convert tuples back to lists
+            return [list(p) for p in path]
+        
+        # Mark current node as processed
+        closed_set.add(current)
+        
+        # Check all neighbors
+        for dx, dy, dz in directions:
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+            
+            # Skip if outside bounds
+            if (neighbor[0] < bounds_min[0] or neighbor[0] > bounds_max[0] or
+                neighbor[1] < bounds_min[1] or neighbor[1] > bounds_max[1] or
+                neighbor[2] < bounds_min[2] or neighbor[2] > bounds_max[2]):
+                continue
+            
+            # Skip if in closed set
+            if neighbor in closed_set:
+                continue
+            
+            # Check if neighbor is in an obstacle
+            in_obstacle = False
+            for obs_id, obs in obstacles.items():
+                obs_pos = np.array([obs['x'], obs['y'], obs['z']])
+                obs_size = np.array([obs['w'], obs['d'], obs['h']]) / 2 + margin
+                
+                if (abs(neighbor[0] - obs_pos[0]) < obs_size[0] and
+                    abs(neighbor[1] - obs_pos[1]) < obs_size[1] and
+                    abs(neighbor[2] - obs_pos[2]) < obs_size[2]):
+                    in_obstacle = True
+                    break
+            
+            if in_obstacle:
+                continue
+            
+            # Check if direct path to neighbor is collision-free
+            if not is_collision_free(current, neighbor, obstacles, margin):
+                continue
+            
+            # Calculate tentative g_score
+            tentative_g_score = g_score[current] + np.linalg.norm(np.array(neighbor) - np.array(current))
+            
+            # Skip if this path to neighbor is worse
+            if neighbor in g_score and tentative_g_score >= g_score[neighbor]:
+                continue
+            
+            # Record this path as the best so far
+            came_from[neighbor] = current
+            g_score[neighbor] = tentative_g_score
+            f_score[neighbor] = g_score[neighbor] + np.linalg.norm(np.array(neighbor) - np.array(goal))
+            
+            # Add to open set if not already there
+            if neighbor not in [i[1] for i in open_set]:
+                heappush(open_set, (f_score[neighbor], neighbor))
+    
+    # If no path found
+    end_time = time.time()
+    print(f"Optimized A* search failed to find a path. Returning direct path. (in {end_time - start_time:.3f} seconds)")
+    return [list(start), list(goal)]
 
 
 def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX_METHOD, path_planning_method=DEFAULT_PATH_PLANNING):
@@ -346,7 +506,7 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     return optimized_ids, distance
 
 
-def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_PATH_PLANNING):
+def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_PATH_PLANNING, astar_implementation=DEFAULT_ASTAR_IMPLEMENTATION):
     """
     Plan a path between two viewpoints avoiding obstacles.
     
@@ -354,6 +514,7 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
     :param goal_pos: 3D goal position [x, y, z]
     :param obstacles: Dictionary of obstacles with position and dimensions
     :param method: Path planning method to use
+    :param astar_implementation: Which A* implementation to use ('optimized' or 'networkx')
     :return: List of waypoints
     """
     if method == 'direct':
@@ -362,12 +523,12 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
             return [start_pos, goal_pos]
         else:
             # Direct path not possible, use path planning
-            return a_star_path_planning(start_pos, goal_pos, obstacles)
+            return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
     elif method == 'a_star':
-        return a_star_path_planning(start_pos, goal_pos, obstacles)
+        return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
     else:
         # Default to A* path planning
-        return a_star_path_planning(start_pos, goal_pos, obstacles)
+        return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
 
 
 def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
@@ -406,7 +567,8 @@ def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
 
 
 def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING, 
-             tsp_method=DEFAULT_TSP_METHOD, matrix_method=DEFAULT_TSP_MATRIX_METHOD, 
+             tsp_method=DEFAULT_TSP_METHOD, matrix_method=DEFAULT_TSP_MATRIX_METHOD,
+             astar_implementation=DEFAULT_ASTAR_IMPLEMENTATION,
              graph_type='full', logger=None) -> bool:
     """
     Run the mission for a single drone using path planning and TSP optimization.
@@ -416,6 +578,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     :param path_planning: Path planning method to use for actual navigation
     :param tsp_method: TSP solver method to use
     :param matrix_method: Method to calculate TSP matrix distances: 'euclidean' or 'pathplanning'
+    :param astar_implementation: Which A* implementation to use ('optimized' or 'networkx')
     :param graph_type: Type of graph representation to use
     :param logger: Optional logger for mission logging
     :return: Bool indicating if the mission was successful
@@ -423,7 +586,8 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     print('Run mission with path planning and TSP optimization')
     if logger:
         logger.info(f'Starting mission with path planning: {path_planning}, ' 
-                    f'TSP: {tsp_method}, Matrix method: {matrix_method}')
+                    f'TSP: {tsp_method}, Matrix method: {matrix_method}, '
+                    f'A* implementation: {astar_implementation}')
     
     # Get viewpoints and obstacles from scenario
     viewpoints = scenario.get("viewpoint_poses", {})
@@ -439,7 +603,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     visited_markers = set()
     
     # Get current drone position as starting point
-    current_pos = drone_interface.position #This is right， stick to it
+    current_pos = drone_interface.position
     if current_pos is None:
         print("Unable to get current drone position")
         if logger:
@@ -470,7 +634,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         # Plan path to the next viewpoint - always using the specified path planning method
         # This is where we use A* or other path planning methods regardless of how TSP was calculated
         path = plan_path_between_viewpoints(
-            current_pos, goal_pos, obstacles, method=path_planning)
+            current_pos, goal_pos, obstacles, method=path_planning, astar_implementation=astar_implementation)
         
         if not path:
             print(f"Failed to plan path to viewpoint {vp_id}")
@@ -761,6 +925,7 @@ def main():
             path_planning=args.path_planning, 
             tsp_method=args.tsp_method,
             matrix_method=args.matrix_method,
+            astar_implementation=args.astar_implementation,
             logger=logger
         )
         
@@ -798,6 +963,9 @@ def parse_args():
     parser.add_argument('-m', '--matrix_method', default=DEFAULT_TSP_MATRIX_METHOD, 
                         choices=['euclidean', 'pathplanning'], 
                         help='Method to calculate TSP distances: euclidean or pathplanning')
+    parser.add_argument('-a', '--astar_implementation', default=DEFAULT_ASTAR_IMPLEMENTATION,
+                        choices=['optimized', 'networkx'],
+                        help='A* implementation to use: optimized (default) or networkx')
     parser.add_argument('--visualize', action='store_true', help='Visualize the scenario')
     parser.add_argument('--detect_markers', action='store_true', help='Enable ArUco marker detection')
     parser.add_argument('--log_dir', default=None, help='Directory to store mission logs')
