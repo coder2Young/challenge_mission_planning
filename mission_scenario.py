@@ -66,11 +66,11 @@ OBSTACLE_SAFETY_MARGIN = 0.5  # Safety margin around obstacles in meters
 
 # Path planning methods
 PATH_PLANNING_METHODS = ['direct', 'a_star', 'dijkstra', 'rrt']
-DEFAULT_PATH_PLANNING = 'rrt'
+DEFAULT_PATH_PLANNING = 'a_star'
 
 # TSP solver methods
 TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search', 'brute_force', 'lin_kernighan']
-DEFAULT_TSP_METHOD = 'simulated_annealing'
+DEFAULT_TSP_METHOD = 'lin_kernighan'
 
 # Default parameters
 DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
@@ -140,7 +140,7 @@ class ArucoDetectorDrone(DroneInterface):
             self.get_logger().error(f"Error processing camera image: {str(e)}")
             print(f"Error processing camera image: {str(e)}")
 
-    def detect_aruco_markers(self, timeout=3.0):
+    def detect_aruco_markers(self, timeout=5.0):
         """
         Detect ArUco markers in the current camera image.
         
@@ -594,7 +594,7 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     total_end_time = time.time()
     total_time = total_end_time - total_start_time
     
-    print(f"\nTSP solved in {solve_time:.2f} seconds.")
+    print(f"\nTSP solved in {solve_time:.6f} seconds.")
     print(f"Total optimization time: {total_time:.2f} seconds.")
     print(f"Optimized path length: {distance:.2f} meters.")
     
@@ -1058,7 +1058,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     print(f"Mission duration: {mission_duration:.2f} seconds")
     print(f"Average speed: {average_speed:.2f} m/s")
     #print(f"Detected markers: {visited_markers}")
-    print(f"Total markers detected: {len(visited_markers)}")
+    print(f"Total markers detected: {len(visited_markers)}/{len(viewpoints)}")
 
     if len(visited_markers) == len(viewpoints):
         print("Mission successful")
