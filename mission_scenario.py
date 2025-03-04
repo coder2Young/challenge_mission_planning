@@ -458,6 +458,7 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     :param path_planning_method: Method to use for path planning if matrix_method='pathplanning'
     :return: Optimized list of viewpoint IDs
     """
+    print("\n=== Viewpoint Order (TSP) Optimization ===")
     print(f"Starting viewpoint order optimization with {len(viewpoints)} viewpoints...")
     print(f"Matrix calculation method: {matrix_method}")
     print(f"TSP solver method: {tsp_method}")
@@ -788,6 +789,7 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
     :param astar_implementation: Which A* implementation to use ('optimized' or 'networkx')
     :return: List of waypoints
     """
+    print("\n==== Path Planning ====")
     if method == 'direct':
         # Check if direct path is collision-free
         if is_collision_free(start_pos, goal_pos, obstacles):
@@ -887,6 +889,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         goal_pos = [vp["x"], vp["y"], vp["z"]]
         vp_yaw = vp["w"]
         
+        print("\n==== Viewpoint {vp_id} ====")
         print(f"Going to viewpoint {vp_id} ({index+1}/{len(optimized_ids)})")
         
         # Plan path to the next viewpoint - always using the specified path planning method
@@ -927,10 +930,8 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
             continue
         
         # Then rotate to the desired yaw at the final position
-        print(f"Adjusting yaw at viewpoint {vp_id} to {vp_yaw}")
+        #print(f"Adjusting yaw at viewpoint {vp_id} to {vp_yaw}")
         success = drone_interface.go_to.go_to_point_with_yaw(goal_pos, angle=vp_yaw, speed=SPEED)
-        if not success:
-            print(f"Failed to adjust yaw at viewpoint {vp_id}")
         
         # Update current position
         current_pos = goal_pos
@@ -938,15 +939,14 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         
 
         # Add a short delay to ensure the drone is stable and camera feed is updated
-        print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
-        sleep(0.5)
-        
-        print(f"Scanning for ArUco markers at viewpoint {vp_id}...")
+        #print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
+        #print(f"Scanning for ArUco markers at viewpoint {vp_id}...")
         
         detected, detected_ids = drone_interface.detect_aruco_markers()
         
         # Log results with more details
-        print(f"Scan completed at viewpoint {vp_id}")
+        #print(f"Scan completed at viewpoint {vp_id}")
+        print("\n==== Aruco Marker Detection Results ====")
         if detected:
             print(f"Detected markers: {detected_ids} at viewpoint {vp_id}")
             visited_markers.append(detected_ids)
@@ -964,8 +964,13 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     print(f"Average speed: {average_speed:.2f} m/s")
     #print(f"Detected markers: {visited_markers}")
     print(f"Total markers detected: {len(visited_markers)}")
-    
-    return True
+
+    if len(visited_markers) == len(viewpoints):
+        print("Mission successful")
+        return True
+    else:
+        print("Mission failed")
+        return False
 
 
 def drone_end(drone_interface: DroneInterface) -> bool:
@@ -1097,10 +1102,6 @@ def main():
         print("Failed to read scenario file")
         return
     
-    # Visualize scenario if requested
-    if args.visualize:
-        visualize_scenario(scenario)
-    
     # Initialize ROS and drone interface
     rclpy.init(args=args.ros_args)
     
@@ -1155,9 +1156,6 @@ def parse_args():
     parser.add_argument('-a', '--astar_implementation', default=DEFAULT_ASTAR_IMPLEMENTATION,
                         choices=['optimized', 'networkx'],
                         help='A* implementation to use: optimized (default) or networkx')
-    parser.add_argument('--visualize', action='store_true', help='Visualize the scenario')
-    parser.add_argument('--detect_markers', action='store_true', help='Enable ArUco marker detection')
-    parser.add_argument('--log_dir', default=None, help='Directory to store mission logs')
     
     # Parse ROS args too
     args, ros_args = parser.parse_known_args()
