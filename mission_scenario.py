@@ -48,10 +48,13 @@ from python_tsp.exact import solve_tsp_dynamic_programming, solve_tsp_brute_forc
 from python_tsp.heuristics import solve_tsp_simulated_annealing, solve_tsp_local_search, solve_tsp_lin_kernighan
 from as2_msgs.msg import YawMode
 from as2_python_api.drone_interface import DroneInterface
-from drone_camera import ArucoDetectorDrone
-
-
+#from drone_camera import ArucoDetectorDrone
 import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+import threading
 
 # Mission parameters
 TAKE_OFF_HEIGHT = 1.0  # Height in meters
@@ -59,12 +62,10 @@ TAKE_OFF_SPEED = 1.0  # Max speed in m/s
 SLEEP_TIME = 0.5  # Sleep time between behaviors in seconds
 SPEED = 1.0  # Max speed in m/s
 LAND_SPEED = 0.5  # Max speed in m/s
-SCAN_DURATION = 5.0  # Duration to scan for ArUco markers at each waypoint (increased from 2.0)
 OBSTACLE_SAFETY_MARGIN = 0.5  # Safety margin around obstacles in meters
-WAYPOINT_TOLERANCE = 0.1  # Distance tolerance for waypoint achievement in meters
 
 # Path planning methods
-PATH_PLANNING_METHODS = ['direct', 'a_star', 'diplotjkstra', 'rrt']
+PATH_PLANNING_METHODS = ['direct', 'a_star', 'dijkstra', 'rrt']
 DEFAULT_PATH_PLANNING = 'rrt'
 
 # TSP solver methods
@@ -75,6 +76,100 @@ DEFAULT_TSP_METHOD = 'simulated_annealing'
 DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
 DEFAULT_ASTAR_IMPLEMENTATION = 'optimized'  # Default A* implementation: 'optimized' or 'networkx'
 
+
+"""
+Drone interface with camera integration for ArUco marker detection.
+"""
+class ArucoDetectorDrone(DroneInterface):
+    """
+    DroneInterface extension with ArUco marker detection capabilities.
+    
+    This class extends the standard DroneInterface to add camera integration
+    and ArUco marker detection functionality.
+    """
+
+    def __init__(self, drone_id: str = 'drone0', verbose: bool = False,
+                 use_sim_time: bool = False, spin_rate: float = 20.0):
+        """
+        Initialize the drone interface with camera capabilities.
+        
+        :param drone_id: drone namespace, defaults to "drone0"
+        :param verbose: output mode, defaults to False
+        :param use_sim_time: use simulation time, defaults to False
+        :param spin_rate: spin rate (Hz), defaults to 20.0
+        """
+        super().__init__(drone_id=drone_id, verbose=verbose, 
+                         use_sim_time=use_sim_time, spin_rate=spin_rate)
+        
+        # Initialize CV Bridge for ROS image to OpenCV conversion
+        self.cv_bridge = CvBridge()
+        
+        # Most recent camera image
+        self.current_image = None
+        self.image_lock = threading.Lock()
+        
+        # ArUco detector parameters
+        self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_5X5_250)
+        self.aruco_params = cv2.aruco.DetectorParameters_create()
+        # Detected ArUco marker IDs
+        self.detected_markers = set()
+        
+        # Subscribe to camera feed
+        self.create_subscription(
+            Image, 
+            "sensor_measurements/hd_camera/image_raw", 
+            self.camera_callback, 
+            qos_profile_sensor_data
+        )
+        
+        print(f"Camera subscription initiated for sensor_measurements/hd_camera/image_raw")
+
+    def camera_callback(self, msg):
+        """
+        Process incoming camera images.
+        
+        :param msg: ROS Image message
+        """
+        try:
+            # Convert ROS Image message to OpenCV format
+            with self.image_lock:
+                self.current_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+                #print(f"Received camera image, shape: {self.current_image.shape if self.current_image is not None else None}")
+                
+        except Exception as e:
+            self.get_logger().error(f"Error processing camera image: {str(e)}")
+            print(f"Error processing camera image: {str(e)}")
+
+    def detect_aruco_markers(self, timeout=3.0):
+        """
+        Detect ArUco markers in the current camera image.
+        
+        :param display_image: Whether to display the image with detected markers
+        :param timeout: Maximum time to wait for a valid image (seconds)
+        :return: Set of detected marker IDs
+        """
+        start_time = time.time()
+        
+        # Wait for a valid image, but no longer than timeout
+        while time.time() - start_time < timeout:
+            with self.image_lock:
+                if self.current_image is None:
+                    continue;
+
+                # Make a copy of the image to avoid threading issues
+                image = self.current_image.copy()
+                #print(f"Got image for processing, shape: {image.shape}")
+                # Apply some preprocessing to help with detection
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                
+                corners, ids, rejected = cv2.aruco.detectMarkers(
+                    gray, self.aruco_dict, parameters=self.aruco_params)
+                
+                if ids is not None and len(ids) > 0:
+                    #print(f"ArUco detection complete: found {len(corners) if corners else 0} markers")
+                    return True, ids.flatten()
+            
+        return False, None
 
 def drone_start(drone_interface: DroneInterface) -> bool:
     """
@@ -499,9 +594,9 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     total_end_time = time.time()
     total_time = total_end_time - total_start_time
     
-    print(f"TSP solved in {solve_time:.2f} seconds.")
+    print(f"\nTSP solved in {solve_time:.2f} seconds.")
     print(f"Total optimization time: {total_time:.2f} seconds.")
-    print(f"Optimized path length: {distance:.2f} units.")
+    print(f"Optimized path length: {distance:.2f} meters.")
     
     return optimized_ids, distance
 
@@ -881,7 +976,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     optimized_ids, estimated_distance = optimize_viewpoint_order(
         viewpoints, obstacles, tsp_method, matrix_method, path_planning)
     print(f"Optimized order: {optimized_ids}")
-    print(f"Estimated total distance: {estimated_distance:.2f} meters")
+    #print(f"Estimated total distance: {estimated_distance:.2f} meters")
     
     # Visit each viewpoint in optimized order
     for index, vp_id in enumerate(optimized_ids):
@@ -889,8 +984,8 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         goal_pos = [vp["x"], vp["y"], vp["z"]]
         vp_yaw = vp["w"]
         
-        print("\n==== Viewpoint {vp_id} ====")
-        print(f"Going to viewpoint {vp_id} ({index+1}/{len(optimized_ids)})")
+        print(f"\n==== Viewpoint {vp_id} ====")
+        #print(f"Going to viewpoint {vp_id} ({index+1}/{len(optimized_ids)})")
         
         # Plan path to the next viewpoint - always using the specified path planning method
         # This is where we use A* or other path planning methods regardless of how TSP was calculated
