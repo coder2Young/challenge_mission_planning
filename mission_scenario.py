@@ -1200,9 +1200,6 @@ def main():
     # Initialize ROS and drone interface
     rclpy.init(args=args.ros_args)
     
-
-    # Use the ArUco detector drone interface
-    from drone_camera import ArucoDetectorDrone
     drone_interface = ArucoDetectorDrone(
         drone_id=args.namespace,
         verbose=args.verbose,
