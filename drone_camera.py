@@ -43,9 +43,8 @@ class ArucoDetectorDrone(DroneInterface):
         self.image_lock = threading.Lock()
         
         # ArUco detector parameters
-        self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_50)
+        self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_5X5_250)
         self.aruco_params = cv2.aruco.DetectorParameters_create()
-        
         # Detected ArUco marker IDs
         self.detected_markers = set()
         
@@ -88,87 +87,20 @@ class ArucoDetectorDrone(DroneInterface):
         # Wait for a valid image, but no longer than timeout
         while time.time() - start_time < timeout:
             with self.image_lock:
-                if self.current_image is not None:
-                    # Make a copy of the image to avoid threading issues
-                    image = self.current_image.copy()
-                    print(f"Got image for processing, shape: {image.shape}")
-                    break
-            time.sleep(0.1)
-        else:
-            self.get_logger().warning("Timeout waiting for camera image")
-            print("Timeout waiting for camera image - no image received within timeout period")
-            return set()
-        
-        # Detect ArUco markers using older OpenCV API
-        try:
-            # Add debugging info about image
-            print(f"Processing image for ArUco detection, image shape: {image.shape}, dtype: {image.dtype}")
-            
-            # Apply some preprocessing to help with detection
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            # Apply adaptive thresholding to help with marker detection
-            # gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            
-            corners, ids, rejected = cv2.aruco.detectMarkers(
-                gray, self.aruco_dict, parameters=self.aruco_params)
-            
-            print(f"ArUco detection complete: found {len(corners) if corners else 0} markers")
-        except Exception as e:
-            print(f"Error during ArUco detection: {str(e)}")
-            return set()
-        
-        # Process results
-        detected_ids = set()
-        if ids is not None and len(ids) > 0:
-            for marker_id in ids.flatten():
-                detected_ids.add(int(marker_id))
-                self.detected_markers.add(int(marker_id))
-            
-            # Display image with marker detections if requested
-            if display_image and len(corners) > 0:
-                # Draw detected markers
-                image_with_markers = cv2.aruco.drawDetectedMarkers(image.copy(), corners, ids)
+                if self.current_image is None:
+                    continue;
+
+                # Make a copy of the image to avoid threading issues
+                image = self.current_image.copy()
+                #print(f"Got image for processing, shape: {image.shape}")
+                # Apply some preprocessing to help with detection
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 
-                # Display the image
-                cv2.imshow("ArUco Marker Detection", image_with_markers)
-                cv2.waitKey(1)  # Wait 1ms
-        
-        # Log detection results
-        if detected_ids:
-            self.get_logger().info(f"Detected ArUco markers: {detected_ids}")
-            print(f"Successfully detected ArUco markers: {detected_ids}")
-        else:
-            self.get_logger().info("No ArUco markers detected")
-            print("No ArUco markers detected in this frame")
+                corners, ids, rejected = cv2.aruco.detectMarkers(
+                    gray, self.aruco_dict, parameters=self.aruco_params)
+                
+                if ids is not None and len(ids) > 0:
+                    print(f"ArUco detection complete: found {len(corners) if corners else 0} markers")
+                    return True, ids.flatten()
             
-        return detected_ids
-    
-    def scan_for_markers(self, duration=2.0, display_image=True):
-        """
-        Actively scan for markers for a specified duration.
-        
-        :param duration: How long to scan for markers (seconds)
-        :param display_image: Whether to display detection images
-        :return: Set of all marker IDs detected during scan
-        """
-        self.get_logger().info(f"Scanning for ArUco markers for {duration} seconds...")
-        print(f"Starting {duration} second scan for ArUco markers...")
-        
-        all_detected = set()
-        end_time = time.time() + duration
-        scan_count = 0
-        
-        # Scan until duration expires
-        while time.time() < end_time:
-            # Detect markers in current frame
-            scan_count += 1
-            print(f"Scan iteration {scan_count}")
-            detected = self.detect_aruco_markers(display_image=display_image)
-            all_detected.update(detected)
-            
-            # Short pause between detections
-            time.sleep(0.1)
-            
-        self.get_logger().info(f"Scan complete. Total markers detected: {len(all_detected)}")
-        print(f"Scan complete. Performed {scan_count} detection iterations. Total markers detected: {all_detected}")
-        return all_detected 
+        return False, None

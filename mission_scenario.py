@@ -46,13 +46,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial import distance
 from python_tsp.exact import solve_tsp_dynamic_programming, solve_tsp_brute_force
 from python_tsp.heuristics import solve_tsp_simulated_annealing, solve_tsp_local_search, solve_tsp_lin_kernighan
-
+from as2_msgs.msg import YawMode
 from as2_python_api.drone_interface import DroneInterface
-try:
-    from challenge_mission_planning.drone_camera import ArucoDetectorDrone
-except ImportError:
-    # Fallback if package is not installed
-    from drone_camera import ArucoDetectorDrone
+from drone_camera import ArucoDetectorDrone
+
 
 import rclpy
 
@@ -79,38 +76,29 @@ DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation met
 DEFAULT_ASTAR_IMPLEMENTATION = 'optimized'  # Default A* implementation: 'optimized' or 'networkx'
 
 
-def drone_start(drone_interface: DroneInterface, logger=None) -> bool:
+def drone_start(drone_interface: DroneInterface) -> bool:
     """
     Take off the drone.
 
     :param drone_interface: DroneInterface object
-    :param logger: Optional logger for mission logging
     :return: Bool indicating if the take off was successful
     """
     print('Start mission')
-    if logger:
-        logger.info('Starting mission')
 
     # Arm
     print('Arm')
     success = drone_interface.arm()
     print(f'Arm success: {success}')
-    if logger:
-        logger.info(f'Arm success: {success}')
 
     # Offboard
     print('Offboard')
     success = drone_interface.offboard()
     print(f'Offboard success: {success}')
-    if logger:
-        logger.info(f'Offboard success: {success}')
 
     # Take Off
     print('Take Off')
     success = drone_interface.takeoff(height=TAKE_OFF_HEIGHT, speed=TAKE_OFF_SPEED)
     print(f'Take Off success: {success}')
-    if logger:
-        logger.info(f'Take Off success: {success}')
 
     # Init position [0, 0, TAKE_OFF_HEIGHT]
     # Back to the initial position if the drone is not there
@@ -856,7 +844,7 @@ def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
 def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING, 
              tsp_method=DEFAULT_TSP_METHOD, matrix_method=DEFAULT_TSP_MATRIX_METHOD,
              astar_implementation=DEFAULT_ASTAR_IMPLEMENTATION,
-             graph_type='full', logger=None) -> bool:
+             graph_type='full') -> bool:
     """
     Run the mission for a single drone using path planning and TSP optimization.
 
@@ -867,34 +855,23 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     :param matrix_method: Method to calculate TSP matrix distances: 'euclidean' or 'pathplanning'
     :param astar_implementation: Which A* implementation to use ('optimized' or 'networkx')
     :param graph_type: Type of graph representation to use
-    :param logger: Optional logger for mission logging
     :return: Bool indicating if the mission was successful
     """
-    print('Run mission with path planning and TSP optimization')
-    if logger:
-        logger.info(f'Starting mission with path planning: {path_planning}, ' 
-                    f'TSP: {tsp_method}, Matrix method: {matrix_method}, '
-                    f'A* implementation: {astar_implementation}')
+    print('=== Run mission with path planning and TSP optimization ===')
     
     # Get viewpoints and obstacles from scenario
     viewpoints = scenario.get("viewpoint_poses", {})
     obstacles = scenario.get("obstacles", {})
     
-    if not viewpoints:
-        print("No viewpoints found in scenario")
-        return False
-    
     # Start metrics collection
     start_time = time.time()
     total_distance = 0
-    visited_markers = set()
+    visited_markers = []
     
     # Get current drone position as starting point
     current_pos = drone_interface.position
     if current_pos is None:
         print("Unable to get current drone position")
-        if logger:
-            logger.error("Unable to get current drone position")
         return False
     
     # Optimize viewpoint order using TSP
@@ -904,10 +881,6 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     print(f"Optimized order: {optimized_ids}")
     print(f"Estimated total distance: {estimated_distance:.2f} meters")
     
-    if logger:
-        logger.info(f"Optimized viewpoint order: {optimized_ids}")
-        logger.info(f"Estimated mission distance: {estimated_distance:.2f} meters")
-    
     # Visit each viewpoint in optimized order
     for index, vp_id in enumerate(optimized_ids):
         vp = viewpoints[vp_id]
@@ -915,8 +888,6 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         vp_yaw = vp["w"]
         
         print(f"Going to viewpoint {vp_id} ({index+1}/{len(optimized_ids)})")
-        if logger:
-            logger.info(f"Moving to viewpoint {vp_id} at position {goal_pos}")
         
         # Plan path to the next viewpoint - always using the specified path planning method
         # This is where we use A* or other path planning methods regardless of how TSP was calculated
@@ -925,8 +896,6 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         
         if not path:
             print(f"Failed to plan path to viewpoint {vp_id}")
-            if logger:
-                logger.error(f"Failed to plan path to viewpoint {vp_id}")
             continue
         
         # Calculate path distance
@@ -936,15 +905,12 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
             path_distance += leg_distance
         
         print(f"Path planned with {len(path)} waypoints, distance: {path_distance:.2f}m")
-        if logger:
-            logger.info(f"Path planned with {len(path)} waypoints, distance: {path_distance:.2f}m")
         
         # Convert waypoints to Path message for follow_path
         path_msg = convert_waypoints_to_path_msg(path)
         
         # Follow path to the waypoint (keep original yaw during path)
         print(f"Following path to viewpoint {vp_id}")
-        from as2_msgs.msg import YawMode
         
         # First follow path with KEEP_YAW to reach the position
         success = drone_interface.follow_path(
@@ -958,58 +924,36 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         
         if not success:
             print(f"Failed to follow path to viewpoint {vp_id}")
-            if logger:
-                logger.error(f"Failed to follow path to viewpoint {vp_id}")
             continue
         
         # Then rotate to the desired yaw at the final position
         print(f"Adjusting yaw at viewpoint {vp_id} to {vp_yaw}")
         success = drone_interface.go_to.go_to_point_with_yaw(goal_pos, angle=vp_yaw, speed=SPEED)
-        
         if not success:
             print(f"Failed to adjust yaw at viewpoint {vp_id}")
-            if logger:
-                logger.warning(f"Failed to adjust yaw at viewpoint {vp_id}, continuing mission")
         
         # Update current position
         current_pos = goal_pos
         total_distance += path_distance
         
-        # Detect ArUco markers at this viewpoint
-        if isinstance(drone_interface, ArucoDetectorDrone):
-            # Add a short delay to ensure the drone is stable and camera feed is updated
-            print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
-            sleep(1.0)
-            
-            # Print current drone position and orientation for debugging
-            current_pos = drone_interface.get_position()
-            current_orientation = drone_interface.get_orientation()
-            print(f"Current drone position: {current_pos}")
-            print(f"Current drone orientation: {current_orientation}")
-            
-            print(f"Scanning for ArUco markers at viewpoint {vp_id} for {SCAN_DURATION} seconds...")
-            if logger:
-                logger.info(f"Scanning for ArUco markers at viewpoint {vp_id}")
-            
-            detected = drone_interface.scan_for_markers(duration=SCAN_DURATION)
-            
-            # Log results with more details
-            print(f"Scan completed at viewpoint {vp_id}")
-            if detected:
-                visited_markers.update(detected)
-                print(f"Detected markers: {detected}")
-                print(f"Total markers detected so far: {visited_markers}")
-                if logger:
-                    logger.info(f"Detected markers at viewpoint {vp_id}: {detected}")
-                    logger.info(f"Total markers detected so far: {len(visited_markers)}")
-            else:
-                print(f"No markers detected at viewpoint {vp_id}, check camera positioning and lighting")
-                if logger:
-                    logger.warning(f"No markers detected at viewpoint {vp_id}")
+
+        # Add a short delay to ensure the drone is stable and camera feed is updated
+        print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
+        sleep(0.5)
         
-        print(f"Viewpoint {vp_id} visited successfully")
-        sleep(SLEEP_TIME)
-    
+        print(f"Scanning for ArUco markers at viewpoint {vp_id}...")
+        
+        detected, detected_ids = drone_interface.detect_aruco_markers()
+        
+        # Log results with more details
+        print(f"Scan completed at viewpoint {vp_id}")
+        if detected:
+            print(f"Detected markers: {detected_ids} at viewpoint {vp_id}")
+            visited_markers.append(detected_ids)
+            print(f"Total markers detected so far: {len(visited_markers)}")
+        else:
+            print(f"No markers detected at viewpoint {vp_id}")
+
     # Calculate mission metrics
     mission_duration = time.time() - start_time
     average_speed = total_distance / mission_duration if mission_duration > 0 else 0
@@ -1018,38 +962,25 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     print(f"Total distance traveled: {total_distance:.2f} meters")
     print(f"Mission duration: {mission_duration:.2f} seconds")
     print(f"Average speed: {average_speed:.2f} m/s")
-    print(f"Detected markers: {visited_markers}")
+    #print(f"Detected markers: {visited_markers}")
     print(f"Total markers detected: {len(visited_markers)}")
-    
-    if logger:
-        logger.info("=== Mission Summary ===")
-        logger.info(f"Total distance traveled: {total_distance:.2f} meters")
-        logger.info(f"Mission duration: {mission_duration:.2f} seconds")
-        logger.info(f"Average speed: {average_speed:.2f} m/s")
-        logger.info(f"Detected markers: {visited_markers}")
-        logger.info(f"Total markers detected: {len(visited_markers)}")
     
     return True
 
 
-def drone_end(drone_interface: DroneInterface, logger=None) -> bool:
+def drone_end(drone_interface: DroneInterface) -> bool:
     """
     End the mission for a single drone.
 
     :param drone_interface: DroneInterface object
-    :param logger: Optional logger for mission logging
     :return: Bool indicating if the land was successful
     """
     print('End mission')
-    if logger:
-        logger.info('Ending mission')
 
     # Land
     print('Land')
     success = drone_interface.land(speed=LAND_SPEED)
     print(f'Land success: {success}')
-    if logger:
-        logger.info(f'Land success: {success}')
     if not success:
         return success
 
@@ -1057,8 +988,6 @@ def drone_end(drone_interface: DroneInterface, logger=None) -> bool:
     print('Manual')
     success = drone_interface.manual()
     print(f'Manual success: {success}')
-    if logger:
-        logger.info(f'Manual success: {success}')
 
     return success
 
@@ -1168,16 +1097,6 @@ def main():
         print("Failed to read scenario file")
         return
     
-    # Create logger if needed
-    logger = None
-    if args.log_dir:
-        from mission_logger import MissionLogger
-        os.makedirs(args.log_dir, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        log_file = os.path.join(args.log_dir, f"mission_log_{timestamp}.txt")
-        logger = MissionLogger(log_file=log_file)
-        logger.set_scenario_info(os.path.basename(args.scenario), args.path_planning, args.tsp_method)
-    
     # Visualize scenario if requested
     if args.visualize:
         visualize_scenario(scenario)
@@ -1185,25 +1104,18 @@ def main():
     # Initialize ROS and drone interface
     rclpy.init(args=args.ros_args)
     
-    if args.detect_markers:
-        # Use the ArUco detector drone interface
-        from drone_camera import ArucoDetectorDrone
-        drone_interface = ArucoDetectorDrone(
-            drone_id=args.namespace,
-            verbose=args.verbose,
-            use_sim_time=args.use_sim_time
-        )
-    else:
-        # Use the standard drone interface
-        from as2_python_api.drone_interface import DroneInterface
-        drone_interface = DroneInterface(
-            drone_id=args.namespace,
-            verbose=args.verbose,
-            use_sim_time=args.use_sim_time
-        )
+
+    # Use the ArUco detector drone interface
+    from drone_camera import ArucoDetectorDrone
+    drone_interface = ArucoDetectorDrone(
+        drone_id=args.namespace,
+        verbose=args.verbose,
+        use_sim_time=args.use_sim_time
+    )
+
     
     # Run the mission
-    drone_start(drone_interface, logger)
+    drone_start(drone_interface)
     
     mission_success = drone_run(
         drone_interface, 
@@ -1212,15 +1124,9 @@ def main():
         tsp_method=args.tsp_method,
         matrix_method=args.matrix_method,
         astar_implementation=args.astar_implementation,
-        logger=logger
     )
     
-    drone_end(drone_interface, logger)
-    
-    # Save mission report
-    if logger:
-        report_file = os.path.join(args.log_dir, f"mission_report_{timestamp}.json")
-        logger.save_mission_report(report_file)
+    drone_end(drone_interface)
     
     rclpy.shutdown()
     
