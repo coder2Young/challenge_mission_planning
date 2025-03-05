@@ -64,18 +64,21 @@ SPEED = 1.0  # Max speed in m/s
 LAND_SPEED = 0.5  # Max speed in m/s
 OBSTACLE_SAFETY_MARGIN = 0.5  # Safety margin around obstacles in meters
 
+
+# NOTE: Just change configs here to run in different methods
 # Path planning methods
 PATH_PLANNING_METHODS = ['direct', 'a_star', 'dijkstra', 'rrt']
 DEFAULT_PATH_PLANNING = 'a_star'
 
 # TSP solver methods
 TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search', 'brute_force', 'lin_kernighan']
-DEFAULT_TSP_METHOD = 'dynamic_programming'
+DEFAULT_TSP_METHOD = 'simulated_annealing'
 
 # Default parameters
 DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
 DEFAULT_ASTAR_IMPLEMENTATION = 'optimized'  # Default A* implementation: 'optimized' or 'networkx'
 
+IS_PATH_PRUNING = True
 
 """
 Drone interface with camera integration for ArUco marker detection.
@@ -498,6 +501,7 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
     n = len(viewpoint_ids)
     distance_matrix = np.zeros((n, n))
     paths = [[None] * n for _ in range(n)]
+    original_distances = np.zeros((n, n))
 
     # Calculate distances between all pairs of viewpoints
     for i in range(n):
@@ -510,20 +514,21 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
             vp_j_id = viewpoint_ids[j]
             pos_j = [vp_j["x"], vp_j["y"], vp_j["z"]]
 
+            eulicdean_distance = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
             paths[i][j] = [pos_i, pos_j]
 
             # Calculate the distance based on the selected method
             if matrix_method == 'euclidean':
                 # Simple Euclidean distance without considering obstacles
-                dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
+                dist = eulicdean_distance
             elif matrix_method == 'pathplanning':
                 # Use path planning to calculate distances considering obstacles
                 if is_collision_free(pos_i, pos_j, obstacles):
                     # Direct distance if path is collision-free
-                    dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
+                    dist = eulicdean_distance
                 else:
                     # Path planning distance
-                    path, _ = plan_path_between_viewpoints(pos_i, pos_j, obstacles, method=path_planning_method)
+                    path = plan_path_between_viewpoints(pos_i, pos_j, obstacles, method=path_planning_method)
                     if path:
                         # Calculate path length
                         dist = 0
@@ -534,10 +539,11 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
                     else:
                         # If no path found, use a large value
                         dist = 1000.0
+
             else:
                 # Default to Euclidean distance
                 print(f"Warning: Unknown matrix method '{matrix_method}', defaulting to Euclidean distance")
-                dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
+                dist = eulicdean_distance
             
             # Update distance matrix
             distance_matrix[i, j] = dist
@@ -835,15 +841,13 @@ def rrt_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, max
                 path.append(start_np)
                 path.reverse()
                 
-                smoothed_path = path_smoothing(path, obstacles, margin)
-                
                 end_time = time.time()
                 print(f"RRT path found in {iterations} iterations")
-                print(f"RRT path has {len(smoothed_path)} waypoints")
+                print(f"RRT path has {len(path)} waypoints")
                 print(f"RRT search completed in {end_time - start_time:.3f} seconds")
                 
                 # Convert numpy arrays to lists
-                return [p.tolist() for p in smoothed_path]
+                return [p.tolist() for p in path]
     
     # If no path found after max iterations
     end_time = time.time()
@@ -851,36 +855,36 @@ def rrt_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, max
     return [start, goal]
 
 
-def path_smoothing(path, obstacles, margin = OBSTACLE_SAFETY_MARGIN, max_iterations=50):
+def path_pruning(path, obstacles, margin = OBSTACLE_SAFETY_MARGIN, max_iterations=50):
     """
-    Smooth a path by removing unnecessary waypoints while keeping it collision-free.
+    Prune a path by removing unnecessary waypoints while keeping it collision-free.
     
     :param path: List of waypoints
     :param obstacles: Dictionary of obstacles with position and dimensions
     :param margin: Safety margin around obstacles
-    :param max_iterations: Maximum number of smoothing iterations
-    :return: Smoothed path
+    :param max_iterations: Maximum number of pruning iterations
+    :return: Pruned path
     """
     if len(path) <= 2:
         return path
     
-    smoothed_path = path.copy()
-    start_point = smoothed_path[0]
-    goal_point = smoothed_path[-1]
+    pruned_path = path.copy()
+    start_point = pruned_path[0]
+    goal_point = pruned_path[-1]
     
     # Iteratively try to remove waypoints
     for _ in range(max_iterations):
         # Start with a random index (not the start or goal)
-        if len(smoothed_path) <= 2:
+        if len(pruned_path) <= 2:
             break
             
-        i = np.random.randint(1, len(smoothed_path) - 1)
+        i = np.random.randint(1, len(pruned_path) - 1)
         
         # Try to remove the waypoint by checking if direct path is collision-free
-        if is_collision_free(smoothed_path[i-1], smoothed_path[i+1], obstacles, margin):
-            smoothed_path.pop(i)
+        if is_collision_free(pruned_path[i-1], pruned_path[i+1], obstacles, margin):
+            pruned_path.pop(i)
     
-    return smoothed_path
+    return pruned_path
 
 
 def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_PATH_PLANNING, astar_implementation=DEFAULT_ASTAR_IMPLEMENTATION):
@@ -917,9 +921,20 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
         leg_distance = np.linalg.norm(np.array(path[i+1]) - np.array(path[i]))
         original_distance += leg_distance
     
-    smoothed_path = path_smoothing(path, obstacles)
+    if IS_PATH_PRUNING:
+        pruned_path = path_pruning(path, obstacles)
+        distance = 0 
+        for i in range(len(pruned_path) - 1):
+            leg_distance = np.linalg.norm(np.array(pruned_path[i+1]) - np.array(pruned_path[i]))
+            distance += leg_distance
 
-    return smoothed_path, original_distance
+        print(f"Path Pruned from {len(path)} to {len(pruned_path)} waypoints")
+        print(f"Original path distance: {original_distance:.2f} meters")
+        print(f"Pruned path distance: {distance:.2f} meters")
+
+        return pruned_path
+    
+    return path
 
 
 def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
@@ -1011,7 +1026,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         # This is where we use A* or other path planning methods regardless of how TSP was calculated
         if current_id == 0:
             print("Planning Path from inital position to first viewpoint")
-            path, _ = plan_path_between_viewpoints(current_pos, goal_pos, obstacles, method=path_planning, astar_implementation=astar_implementation)
+            path = plan_path_between_viewpoints(current_pos, goal_pos, obstacles, method=path_planning, astar_implementation=astar_implementation)
         else:
             print("Path already planned")
             if current_id > vp_id:
@@ -1035,7 +1050,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         # Convert waypoints to Path message for follow_path
         path_msg = convert_waypoints_to_path_msg(path)
         
-        # Follow path to the waypoint (keep original yaw during path)
+        # Follow path to the waypoint (face to the vp yaw during path)
         print(f"Following path to viewpoint {vp_id}")
         
         # First follow path with KEEP_YAW to reach the position
