@@ -70,7 +70,7 @@ DEFAULT_PATH_PLANNING = 'a_star'
 
 # TSP solver methods
 TSP_METHODS = ['dynamic_programming', 'simulated_annealing', 'local_search', 'brute_force', 'lin_kernighan']
-DEFAULT_TSP_METHOD = 'lin_kernighan'
+DEFAULT_TSP_METHOD = 'dynamic_programming'
 
 # Default parameters
 DEFAULT_TSP_MATRIX_METHOD = 'pathplanning'  # Default TSP matrix calculation method: 'euclidean' or 'pathplanning'
@@ -199,6 +199,9 @@ def drone_start(drone_interface: DroneInterface) -> bool:
     # Back to the initial position if the drone is not there
     if drone_interface.position != [0, 0, TAKE_OFF_HEIGHT]:
         print('Back to initial position')
+        current_position = drone_interface.position
+        drone_interface.go_to(x=current_position[0], y=current_position[1], z=0.1, speed=SPEED)
+        drone_interface.go_to(x=0, y=0, z=0.1, speed=SPEED)
         drone_interface.go_to(x=0, y=0, z=TAKE_OFF_HEIGHT, speed=SPEED)
 
     return success
@@ -494,16 +497,21 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
     viewpoint_ids = list(viewpoints.keys())
     n = len(viewpoint_ids)
     distance_matrix = np.zeros((n, n))
-    
+    paths = [[None] * n for _ in range(n)]
+
     # Calculate distances between all pairs of viewpoints
     for i in range(n):
         vp_i = viewpoints[viewpoint_ids[i]]
+        vp_i_id = viewpoint_ids[i]
         pos_i = [vp_i["x"], vp_i["y"], vp_i["z"]]
         
         for j in range(i+1, n):
             vp_j = viewpoints[viewpoint_ids[j]]
+            vp_j_id = viewpoint_ids[j]
             pos_j = [vp_j["x"], vp_j["y"], vp_j["z"]]
-            
+
+            paths[i][j] = [pos_i, pos_j]
+
             # Calculate the distance based on the selected method
             if matrix_method == 'euclidean':
                 # Simple Euclidean distance without considering obstacles
@@ -515,13 +523,14 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
                     dist = np.linalg.norm(np.array(pos_j) - np.array(pos_i))
                 else:
                     # Path planning distance
-                    path = plan_path_between_viewpoints(pos_i, pos_j, obstacles, method=path_planning_method)
+                    path, _ = plan_path_between_viewpoints(pos_i, pos_j, obstacles, method=path_planning_method)
                     if path:
                         # Calculate path length
                         dist = 0
                         for k in range(len(path) - 1):
                             leg_distance = np.linalg.norm(np.array(path[k+1]) - np.array(path[k]))
                             dist += leg_distance
+                        paths[i][j] = path
                     else:
                         # If no path found, use a large value
                         dist = 1000.0
@@ -538,7 +547,7 @@ def calculate_tsp_matrix(viewpoints, obstacles, matrix_method=DEFAULT_TSP_MATRIX
     matrix_calculation_time = matrix_end_time - matrix_start_time
     print(f"TSP matrix calculation completed in {matrix_calculation_time:.2f} seconds.")
     
-    return distance_matrix
+    return distance_matrix, paths
 
 
 def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHOD, 
@@ -563,7 +572,7 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     total_start_time = time.time()
     
     # Calculate TSP distance matrix
-    distance_matrix = calculate_tsp_matrix(viewpoints, obstacles, matrix_method, path_planning_method)
+    distance_matrix, paths = calculate_tsp_matrix(viewpoints, obstacles, matrix_method, path_planning_method)
     
     # Solve TSP
     print(f"Solving TSP using {tsp_method} method...")
@@ -598,7 +607,7 @@ def optimize_viewpoint_order(viewpoints, obstacles, tsp_method=DEFAULT_TSP_METHO
     print(f"Total optimization time: {total_time:.2f} seconds.")
     print(f"Optimized path length: {distance:.2f} meters.")
     
-    return optimized_ids, distance
+    return optimized_ids, distance, paths
 
 
 def dijkstra_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN):
@@ -826,7 +835,6 @@ def rrt_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, max
                 path.append(start_np)
                 path.reverse()
                 
-                # Path smoothing - optional but recommended for RRT
                 smoothed_path = path_smoothing(path, obstacles, margin)
                 
                 end_time = time.time()
@@ -843,7 +851,7 @@ def rrt_path_planning(start, goal, obstacles, margin=OBSTACLE_SAFETY_MARGIN, max
     return [start, goal]
 
 
-def path_smoothing(path, obstacles, margin, max_iterations=50):
+def path_smoothing(path, obstacles, margin = OBSTACLE_SAFETY_MARGIN, max_iterations=50):
     """
     Smooth a path by removing unnecessary waypoints while keeping it collision-free.
     
@@ -857,6 +865,8 @@ def path_smoothing(path, obstacles, margin, max_iterations=50):
         return path
     
     smoothed_path = path.copy()
+    start_point = smoothed_path[0]
+    goal_point = smoothed_path[-1]
     
     # Iteratively try to remove waypoints
     for _ in range(max_iterations):
@@ -888,19 +898,28 @@ def plan_path_between_viewpoints(start_pos, goal_pos, obstacles, method=DEFAULT_
     if method == 'direct':
         # Check if direct path is collision-free
         if is_collision_free(start_pos, goal_pos, obstacles):
-            return [start_pos, goal_pos]
+            path = [start_pos, goal_pos]
         else:
             # Direct path not possible, use path planning
-            return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
+            path = a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
     elif method == 'a_star':
-        return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
+        path = a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
     elif method == 'dijkstra':
-        return dijkstra_path_planning(start_pos, goal_pos, obstacles)
+        path = dijkstra_path_planning(start_pos, goal_pos, obstacles)
     elif method == 'rrt':
-        return rrt_path_planning(start_pos, goal_pos, obstacles)
+        path = rrt_path_planning(start_pos, goal_pos, obstacles)
     else:
         # Default to A* path planning
-        return a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
+        path = a_star_path_planning(start_pos, goal_pos, obstacles, implementation=astar_implementation)
+
+    original_distance = 0
+    for i in range(len(path) - 1):
+        leg_distance = np.linalg.norm(np.array(path[i+1]) - np.array(path[i]))
+        original_distance += leg_distance
+    
+    smoothed_path = path_smoothing(path, obstacles)
+
+    return smoothed_path, original_distance
 
 
 def convert_waypoints_to_path_msg(waypoints, frame_id='earth'):
@@ -959,7 +978,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     # Get viewpoints and obstacles from scenario
     viewpoints = scenario.get("viewpoint_poses", {})
     obstacles = scenario.get("obstacles", {})
-    
+
     # Start metrics collection
     start_time = time.time()
     total_distance = 0
@@ -970,14 +989,15 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
     if current_pos is None:
         print("Unable to get current drone position")
         return False
+    current_id = 0
     
     # Optimize viewpoint order using TSP
     print(f"Optimizing viewpoint order using {tsp_method} TSP solver and {matrix_method} distance calculation")
-    optimized_ids, estimated_distance = optimize_viewpoint_order(
+    optimized_ids, estimated_distance, paths = optimize_viewpoint_order(
         viewpoints, obstacles, tsp_method, matrix_method, path_planning)
     print(f"Optimized order: {optimized_ids}")
-    #print(f"Estimated total distance: {estimated_distance:.2f} meters")
-    
+    print(f"Estimated total distance: {estimated_distance:.2f} meters")
+
     # Visit each viewpoint in optimized order
     for index, vp_id in enumerate(optimized_ids):
         vp = viewpoints[vp_id]
@@ -989,8 +1009,16 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
         
         # Plan path to the next viewpoint - always using the specified path planning method
         # This is where we use A* or other path planning methods regardless of how TSP was calculated
-        path = plan_path_between_viewpoints(
-            current_pos, goal_pos, obstacles, method=path_planning, astar_implementation=astar_implementation)
+        if current_id == 0:
+            print("Planning Path from inital position to first viewpoint")
+            path, _ = plan_path_between_viewpoints(current_pos, goal_pos, obstacles, method=path_planning, astar_implementation=astar_implementation)
+        else:
+            print("Path already planned")
+            if current_id > vp_id:
+                path = paths[vp_id - 1][current_id - 1]
+                path = path[::-1]
+            else:
+                path = paths[current_id - 1][vp_id - 1]
         
         if not path:
             print(f"Failed to plan path to viewpoint {vp_id}")
@@ -1015,7 +1043,7 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
             path=path_msg,
             speed=SPEED,
             frame_id='earth',
-            yaw_mode=YawMode.KEEP_YAW,
+            yaw_mode=YawMode.FIXED_YAW,
             yaw_angle=float(vp_yaw),
             wait=True
         )
@@ -1024,15 +1052,11 @@ def drone_run(drone_interface, scenario, path_planning=DEFAULT_PATH_PLANNING,
             print(f"Failed to follow path to viewpoint {vp_id}")
             continue
         
-        # Then rotate to the desired yaw at the final position
-        #print(f"Adjusting yaw at viewpoint {vp_id} to {vp_yaw}")
-        success = drone_interface.go_to.go_to_point_with_yaw(goal_pos, angle=vp_yaw, speed=SPEED)
-        
         # Update current position
         current_pos = goal_pos
+        current_id = vp_id
         total_distance += path_distance
         
-
         # Add a short delay to ensure the drone is stable and camera feed is updated
         #print(f"Waiting to stabilize at viewpoint {vp_id} before scanning...")
         #print(f"Scanning for ArUco markers at viewpoint {vp_id}...")
